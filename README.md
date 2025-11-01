@@ -1,4 +1,4 @@
-![](https://github.com/hmlongco/Navigator/blob/main/Logo.png?raw=true)
+![](https://github.com/hmlongco/Runes/blob/main/Logo.png?raw=true)
 
 # Runes
 
