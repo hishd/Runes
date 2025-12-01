@@ -22,7 +22,7 @@ public final class Overlays: ObservableObject, Toasts, Blocking, @unchecked Send
 
     // MARK: Public API
 
-    @MainActor public func showBlocking(_ isPresented: Bool) {
+    @MainActor public func blocking(_ isPresented: Bool) {
         if isPresented {
             Overlays.shared.show(.blocking(true))
         } else {
@@ -30,11 +30,11 @@ public final class Overlays: ObservableObject, Toasts, Blocking, @unchecked Send
         }
     }
 
-    @MainActor public func show(duration: TimeInterval = 2.0, _ view: some ToastViews)  {
+    @MainActor public func toast(duration: TimeInterval = 2.0, _ view: some ToastViews)  {
         show(.init(id: UUID(), duration: duration, content: AnyView(view)))
     }
 
-    @MainActor public func show<V: View>(duration: TimeInterval = 2.0, @ViewBuilder content: () -> V) {
+    @MainActor public func toast<V: View>(duration: TimeInterval = 2.0, @ViewBuilder content: () -> V) {
         show(.init(id: UUID(), duration: duration, content: AnyView(content())))
     }
 

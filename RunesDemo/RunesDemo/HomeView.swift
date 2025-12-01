@@ -16,9 +16,9 @@ enum MyToasts: ToastViews {
     var body: some View {
         switch self {
         case .message(let message):
-            StandardTextToast(message: message)
+            Toast(message)
         case .error(let error):
-            StandardTextToast(error: error)
+            Toast(error: error)
         }
     }
 }
@@ -31,16 +31,16 @@ struct HomeView: View {
     @State private var toast: MyToasts?
 
     init() {
-        StandardTextToast.defaultForegroundColor = .black
-        StandardTextToast.defaultBackgroundColor = .green
+        Toast.defaultForegroundColor = .black
+        Toast.defaultBackgroundColor = .green
     }
 
     var body: some View {
         List {
             Section {
                 Button("Trigger Programatic Toasts") {
-                    toasts.show(message: "A toast")
-                    toasts.show(message: "Another toast")
+                    toasts.toast("A toast", icon: "info.circle.fill")
+                    toasts.toast("Another toast", icon: "info.circle.fill")
                 }
                 Button("Trigger Message Toast Binding") {
                     toast = .message("This was a bound toast message.")
@@ -48,7 +48,7 @@ struct HomeView: View {
             }
             Section {
                 Button("Trigger Programatic Error") {
-                    toasts.show(error: "This is an error message.")
+                    toasts.toast(error: "This is an error message.")
                 }
                 Button("Trigger Toast Error Binding") {
                     toast = .error("This is an error message.")
@@ -59,13 +59,13 @@ struct HomeView: View {
                     isBlocking = true
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                         isBlocking = false
-                        toasts.show(error: "Loading error")
+                        toasts.toast(error: "Loading error")
                     }
                 }
             }
         }
-        .showToast($toast)
-        .blocking(isPresented: isBlocking)
+        .toast($toast)
+        .blocking(isBlocking)
         .tint(.primary)
     }
 }

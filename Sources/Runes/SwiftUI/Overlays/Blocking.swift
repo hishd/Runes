@@ -8,7 +8,7 @@
 import SwiftUI
 
 public protocol Blocking {
-    @MainActor func showBlocking(_ isPresented: Bool)
+    @MainActor func blocking(_ isPresented: Bool)
 }
 
 @available(macOS, unavailable)
@@ -17,7 +17,7 @@ extension EnvironmentValues {
 }
 
 extension View {
-    public func blocking(isPresented: Bool) -> some View {
+    public func blocking(_ isPresented: Bool) -> some View {
         self.modifier(BlockingOverlayModifier(isPresented: isPresented))
     }
 }
@@ -29,7 +29,7 @@ private struct BlockingOverlayModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
             .onChange(of: isPresented) {
-                Overlays.shared.showBlocking(isPresented)
+                Overlays.shared.blocking(isPresented)
             }
     }
 }
