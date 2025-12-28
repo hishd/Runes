@@ -1,12 +1,12 @@
 //
-//  AsyncValuesSubject.swift
-//  Runes
+//  SharedAsyncStream.swift
+//  AsyncTrials
 //
-//  Created by Michael Long on 12/20/25.
+//  Created by Michael Long on 12/27/25.
 //
 
-@preconcurrency import Combine
-@preconcurrency import Foundation
+import Foundation
+import os
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -14,7 +14,7 @@ import UIKit
 /// Shared datasource for async value streams. Subject automatically loads its initial state on first subscription.
 /// ```swift
 /// class TestService {
-///    lazy var integers: AsyncValuesSubject<Int> = .init { [weak self] in
+///    lazy var integers: SharedAsyncStream<Int> = .init { [weak self] in
 ///         try await self?.initialLoad()
 ///    }
 ///
@@ -33,9 +33,9 @@ import UIKit
 ///
 /// If no additional mutable state is required the containing service could also be struct-based and `lazy` omitted. Again, first load only occurs
 /// on first subscription.
-/// ```swift
+/// /// ```swift
 /// struct TestService {
-///    var integers: AsyncValuesSubject<Int> = .init {
+///    var integers: SharedAsyncStream<Int> = .init {
 ///         try await initialLoad()
 ///    }
 ///
@@ -54,14 +54,8 @@ import UIKit
 /// ```
 /// Awaiting `service.stream` will trigger the initial loading state, returning `.loading` and then, hopefully, the first value.
 ///
-/// One can also use the Combine publisher directly.
-/// ```swift
-/// .onReceive(viewModel.service.publisher) { next in
-///     self.value = next.value
-/// }
-/// ```
-/// Returned values are of the enumerated type Element.
-/// ```swift
+/// Returned values are of type Element.
+/// ```Swift
 /// enum Element {
 ///     case loading
 ///     case value(Value)
@@ -69,13 +63,13 @@ import UIKit
 ///     case cancelled
 /// }
 /// ```
-/// Element, as shown above, has several helper functions like `value`, `error`, and so on that return optional instances if the type is in fact
+/// Element has several helper functions like `value`, `error`, and so on that return optional instances if the type is in fact
 /// that particular state.
-/// ```swift
+/// /// ```swift
 /// self.value = next.value // returns value or nil if next isn't a value type
 /// ```
 /// As mentioned, state can be mutated whenever needed and new values sent to all subscribers/listeners.
-/// ```swift
+/// ```Swift
 /// extension TestService {
 ///     func update(value: Int, for id: Int) async throws {
 ///         let newValue = try await database.update(value, for id: id)
@@ -85,32 +79,43 @@ import UIKit
 /// ```
 /// Future subscribers will also see the latest value.
 ///
-/// AsyncValuesSubject's behavior can be tuned as needed.
+/// SharedAsyncStream's behavior can be tuned as needed.
 /// ```Swift
-/// lazy var integers: AsyncValuesSubject<Int> = .init(options: [.reloadOnActive, .throwsCancellationErrors]) { [weak self] in
+/// lazy var integers: SharedAsyncStream<Int> = .init(options: [.reloadOnActive, .throwsCancellationErrors]) { [weak self] in
 ///     try await self?.networking.load()
 /// }
 /// ```
-/// See `AsyncValuesSubjectOptions` for more.
-final public class AsyncValuesSubject<Value: Sendable>: @unchecked Sendable {
+/// See `SharedAsyncStreamOptions` for more.
+nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Sendable {
     public typealias AsyncLoader = () async throws -> Value?
 
-    private let subject: CurrentValueSubject<Element, Never>
-    private let options: AsyncValuesSubjectOptions
-    private var loader: AsyncLoader?
+    // MARK: - State (protected by lock)
+
+    private struct Listener {
+        let yield: @Sendable (Element) -> Void
+        let finish: @Sendable () -> Void
+    }
+
+    private var currentElement: Element
     private var currentTask: Task<Void, Never>?
+    private var loader: AsyncLoader?
     private var didBecomeActiveObserver: NSObjectProtocol?
+    private let options: SharedAsyncStreamOptions
+    private var listeners: [UUID: Listener] = [:]
+    private let lock = OSAllocatedUnfairLock()
+
+    // MARK: - Init / Deinit
 
     /// Initialize with value, has no loader
     public init(initialValue: Value) {
-        self.subject = .init(.value(initialValue))
+        self.currentElement = .value(initialValue)
         self.loader = nil
         self.options = []
     }
 
     /// Initialize with options and load/reload function.
-    public init(options: AsyncValuesSubjectOptions = .defaults, loader: @escaping AsyncLoader) {
-        self.subject = .init(.loading)
+    public init(options: SharedAsyncStreamOptions = .defaults, loader: @escaping AsyncLoader) {
+        self.currentElement = .loading
         self.loader = loader
         self.options = options
 
@@ -125,9 +130,7 @@ final public class AsyncValuesSubject<Value: Sendable>: @unchecked Sendable {
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                DispatchQueue.main.async {
-                    self?.reload()
-                }
+                self?.reload()
             }
         }
         #endif
@@ -139,63 +142,50 @@ final public class AsyncValuesSubject<Value: Sendable>: @unchecked Sendable {
             NotificationCenter.default.removeObserver(token)
         }
         #endif
+
         currentTask?.cancel()
-        currentTask = nil
-        subject.send(.cancelled)
-        subject.send(completion: .finished)
+        finishAllListeners()
     }
 
-    /// Get current subject's Element
+    // MARK: - Current value access
+
+    /// Get current stream's Element
     public var current: Element {
-        subject.value
+        lock.lock(); defer { lock.unlock() }
+        return currentElement
     }
 
-    /// Get current subject's value, if any
+    /// Get current stream's value, if any
     public var value: Value? {
-        subject.value.value
+        current.value
     }
 
-    // Get current error state, if any
+    /// Get current error state, if any
     public var error: Error? {
-        subject.value.error
+        current.error
     }
+
+    // MARK: - Sending states
 
     /// Cancels current load (if any) and sends value to all listeners
     public func send(_ value: Value) {
-        currentTask?.cancel()
-        currentTask = nil
-        subject.send(.value(value))
+        cancelCurrentTaskOnly()
+        broadcast(.value(value))
     }
 
     /// Cancels current load (if any) and sends error state to all listeners
     public func fail(with error: Error) {
-        currentTask?.cancel()
-        currentTask = nil
-        subject.send(.error(error))
+        cancelCurrentTaskOnly()
+        broadcast(.error(error))
     }
 
-    /// Combine publisher for AsyncValues.
-    /// ```swift
-    /// .onReceive(viewModel.service.publisher) { next in
-    ///     self.value = next.value
-    /// }
-    /// ```
-    /// This also contains the core "load on first subscription" function on which the async streams functions are built.
-    ///
-    /// Elements are returned for all cases: .loading, .value, .error, and .cancelled. It's up to the caller to decide
-    /// how to handle the cases and associated values.
-    ///
-    /// Think of materialize/dematerialize in RxSwift.
-   public var publisher: AnyPublisher<Element, Never> {
-        subject
-            .map { [weak self] next in
-                if case .loading = next {
-                    self?.triggerLoadIfNeeded()
-                }
-                return next
-            }
-            .eraseToAnyPublisher()
+    /// Explicit cancellation, cancels current tasks AND notifies streams of cancelled loads
+    public func cancel() {
+        cancelCurrentTaskOnly()
+        broadcast(.cancelled)
     }
+
+    // MARK: - Async sequences
 
     /// Async stream for AsyncValues.
     /// ```swift
@@ -211,15 +201,17 @@ final public class AsyncValuesSubject<Value: Sendable>: @unchecked Sendable {
     /// Think of materialize/dematerialize in RxSwift.
     public var stream: AsyncStream<Element> {
         AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
-            let cancellable = publisher
-                .sink { completion in
+            let token = addAsyncListener(
+                yield: { element in
+                    continuation.yield(element)
+                },
+                finish: {
                     continuation.finish()
-                } receiveValue: { next in
-                    continuation.yield(next)
                 }
+            )
 
             continuation.onTermination = { @Sendable _ in
-                cancellable.cancel()
+                self.removeAsyncListener(token)
             }
         }
     }
@@ -236,18 +228,16 @@ final public class AsyncValuesSubject<Value: Sendable>: @unchecked Sendable {
     ///     }
     /// }
     /// ```
-    /// AsyncValue.Value types are returned in the stream. Published .error values cause errors to be thrown and will
+    /// AsyncValue.Value types are returned in the stream. Any .error values cause errors to be thrown and will
     /// exit the stream.
     ///
     /// Cancellation errors may do so if the .throwsCancellationErrors option is set.
     public var values: AsyncThrowingStream<Value?, Error> {
         let throwsCancellationErrors = options.contains(.throwsCancellationErrors)
         return AsyncThrowingStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
-            let cancellable = publisher
-                .sink { completion in
-                    continuation.finish()
-                } receiveValue: { next in
-                    switch next {
+            let token = addAsyncListener(
+                yield: { element in
+                    switch element {
                     case .empty:
                         continuation.yield(nil)
                     case let .value(value):
@@ -261,62 +251,134 @@ final public class AsyncValuesSubject<Value: Sendable>: @unchecked Sendable {
                     case .loading:
                         break
                     }
+                },
+                finish: {
+                    continuation.finish()
                 }
+            )
 
             continuation.onTermination = { @Sendable _ in
-                cancellable.cancel()
+                self.removeAsyncListener(token)
             }
         }
     }
+
+    // MARK: - Helpers
 
     /// Force a reload via the async loader typically after explicit invalidation.
     ///
     /// Does nothing if loading is currently in progress.
     public func reload() {
         if !options.contains(.reloadsSilently) {
-            subject.send(.loading)
+            broadcast(.loading)
         }
         triggerLoadIfNeeded()
     }
 
-    /// Explicit cancellation, cancels current tasks AND notifies streams of cancelled loads
-    public func cancel() {
-        currentTask?.cancel()
-        currentTask = nil
-        subject.send(.cancelled)
+    // MARK: - Internals (listener management)
+
+    internal func addAsyncListener(yield: @escaping @Sendable (Element) -> Void, finish: @escaping @Sendable () -> Void) -> UUID {
+        let token = UUID()
+
+        let (value, task) = lock.withLock {
+            self.listeners[token] = Listener(yield: yield, finish: finish)
+            return (currentElement, currentTask)
+        }
+
+        yield(value) // always yields current value
+
+        if case .loading = value, task == nil {
+            triggerLoadIfNeeded()
+        }
+
+        return token
+    }
+
+    internal func removeAsyncListener(_ id: UUID) {
+        lock.withLock {
+            listeners[id] = nil
+        }
+    }
+
+    private func broadcast(_ element: Element) {
+        let listeners = lock.withLock {
+            self.currentElement = element
+            return self.listeners
+        }
+
+        for listener in listeners {
+            listener.value.yield(element)
+        }
+
+        if case .loading = element {
+            triggerLoadIfNeeded()
+        }
+    }
+
+    private func finishAllListeners() {
+        let listeners = lock.withLock {
+            self.listeners
+        }
+
+        for listener in listeners {
+            listener.value.finish()
+        }
+    }
+
+    private func cancelCurrentTaskOnly() {
+        let task = lock.withLock {
+            currentTask.take()
+        }
+        task?.cancel()
+    }
+
+    private func clearCurrentTask() {
+        lock.withLock {
+            self.currentTask = nil
+        }
     }
 
     /// Internal loading function
     private func triggerLoadIfNeeded() {
-        guard let loader, currentTask == nil else {
+        let currentTask = lock.withLock { self.currentTask }
+
+        guard currentTask == nil else {
             return
         }
 
-        currentTask = Task { @MainActor [weak self] in
+        let task = Task { [weak self] in
+            guard let self, let loader else {
+                return
+            }
+
             defer {
-                self?.currentTask = nil
+                self.clearCurrentTask()
             }
 
             do {
                 try Task.checkCancellation()
                 if let value = try await loader() {
                     try Task.checkCancellation()
-                    self?.subject.send(.value(value))
+                    self.broadcast(.value(value))
                 } else {
-                    self?.subject.send(.empty)
+                    self.broadcast(.empty)
                 }
             } catch is CancellationError {
-                self?.subject.send(.cancelled)
+                self.broadcast(.cancelled)
             } catch {
-                self?.subject.send(.error(error))
+                self.broadcast(.error(error))
             }
+        }
+
+        lock.withLock {
+            self.currentTask = task
         }
     }
 }
 
-public extension AsyncValuesSubject {
-    /// Status and value type propagated by AsyncValuesSubject.
-    enum Element: @unchecked Sendable {
+public extension SharedAsyncStream {
+    /// Status and value type propagated by SharedAsyncStream.
+    nonisolated enum Element: @unchecked Sendable {
         case loading
         case empty
         case value(Value)
@@ -325,89 +387,79 @@ public extension AsyncValuesSubject {
 
         /// Returns value from AsyncValue state if it exists
         public var value: Value? {
-            if case let .value(value) = self {
-                return value
-            }
+            if case let .value(value) = self { return value }
             return nil
+        }
+
+        public var isValue: Bool {
+            if case .value = self { return true }
+            return false
         }
 
         /// Returns error from AsyncValue state if it exists
         public var error: Error? {
-            if case let .error(error) = self {
-                return error
-            }
+            if case let .error(error) = self { return error }
             return nil
+        }
+
+        public var isError: Bool {
+            if case .error = self { return true }
+            return false
         }
 
         /// Returns true if current AsyncValue state is empty
         public var isEmpty: Bool {
-            if case .empty = self {
-                return true
-            }
+            if case .empty = self { return true }
             return false
         }
 
         /// Returns true if current AsyncValue state is loading
         public var isLoading: Bool {
-            if case .loading = self {
-                return true
-            }
+            if case .loading = self { return true }
             return false
         }
 
         /// Returns true if current AsyncValue state is cancelled
         public var isCancelled: Bool {
-            if case .cancelled = self {
-                return true
-            }
+            if case .cancelled = self { return true }
             return false
         }
     }
 }
 
-extension AsyncValuesSubject.Element: Equatable where Value: Equatable {
-    public static func == (lhs: AsyncValuesSubject.Element, rhs: AsyncValuesSubject.Element) -> Bool {
+extension SharedAsyncStream.Element: Equatable where Value: Equatable {
+    public static func == (lhs: SharedAsyncStream.Element, rhs: SharedAsyncStream.Element) -> Bool {
         switch (lhs, rhs) {
-        case (.loading, .loading):
-            return true
-        case let (.value(lhsValue), .value(rhsValue)):
-            return lhsValue == rhsValue
-        case (.error, .error):
-            return true
-        case (.empty, .empty):
-            return true
-        case (.cancelled, .cancelled):
-            return true
-        default:
-            return false
+        case (.loading, .loading): return true
+        case let (.value(a), .value(b)): return a == b
+        case (.error, .error): return true
+        case (.empty, .empty): return true
+        case (.cancelled, .cancelled): return true
+        default: return false
         }
     }
 }
 
-public struct AsyncValuesSubjectOptions: OptionSet, Sendable {
+nonisolated public struct SharedAsyncStreamOptions: OptionSet {
     public let rawValue: Int
-
-    public init(rawValue: Int) {
-        self.rawValue = rawValue
-    }
+    public init(rawValue: Int) { self.rawValue = rawValue }
 
     /// Load on first initialization and NOT on first subscription
-    public static let loadOnInit = AsyncValuesSubjectOptions(rawValue: 1 << 0)
+    nonisolated(unsafe) public static let loadOnInit = SharedAsyncStreamOptions(rawValue: 1 << 0)
 
     #if canImport(UIKit)
     /// Automatically reload values when resuming active from the background
-    public static let reloadOnActive = AsyncValuesSubjectOptions(rawValue: 1 << 1)
+    nonisolated(unsafe) public static let reloadOnActive = SharedAsyncStreamOptions(rawValue: 1 << 1)
     #endif
 
     /// If reload occurs the .loading message will not be sent and subject will remain in the current state
-    public static let reloadsSilently = AsyncValuesSubjectOptions(rawValue: 1 << 2)
-
+    nonisolated(unsafe) public static let reloadsSilently = SharedAsyncStreamOptions(rawValue: 1 << 2)
     /// If set cancellation errors will terminate value streams
-    public static let throwsCancellationErrors = AsyncValuesSubjectOptions(rawValue: 1 << 3)
+    nonisolated(unsafe) public static let throwsCancellationErrors = SharedAsyncStreamOptions(rawValue: 1 << 3)
 
     /// Sets global default preferences for AsyncValuesSubjects that don't specify their own.
     ///
     /// Default behavior loads on subscription, doesn't reload on active, sends loading states on reload, and task cancellation doesn't kill
     /// await value listeners.
-    nonisolated(unsafe) public static var defaults: AsyncValuesSubjectOptions = []
+    nonisolated(unsafe) public static var defaults: SharedAsyncStreamOptions = []
 }
