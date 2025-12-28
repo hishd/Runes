@@ -57,6 +57,11 @@ struct AsyncFunctionTaskValueView: View {
                 await viewModel.asyncListen()
                 print("Async Function Listening completed")
             }
+            .task {
+                print("Async Group Listening")
+                await viewModel.asyncTaskGroupListen()
+                print("Async Group Listening completed")
+            }
     }
 }
 
@@ -115,27 +120,54 @@ struct PublisherValueView: View {
 class AsyncDemoViewModel {
     @ObservationIgnored
     let service = TestService()
+    @ObservationIgnored
+    var cancellables = Set<AnyCancellable>()
 
     var integer: Int? = nil
+    var double: Double? = nil
     var another: Bool = false
 
     init() {
         taskListen()
     }
 
-    func taskListen() {
-        Task { [weak self, stream = service.integers.stream] in
-            for await next in stream {
-                guard let self else { break }
-                self.integer = next.value
-            }
-        }
-    }
-
     func asyncListen() async {
         for await next in service.integers.stream {
             integer = next.value
         }
+    }
+
+    func asyncListen2() async {
+        for await next in service.integers.stream {
+            integer = next.value
+        }
+    }
+
+    func asyncTaskGroupListen() async {
+        await withTaskGroup { [service] group in
+            group.addTask {
+                for await next in service.integers.stream {
+                    DispatchQueue.main.async { self.integer = next.value }
+                }
+                print("Exit asyncTaskGroupListen")
+            }
+            group.addTask {
+                for await next in service.doubles.stream {
+                    DispatchQueue.main.async { self.double = next.value }
+                }
+                print("Exit asyncTaskGroupListen")
+            }
+        }
+    }
+
+    func taskListen() {
+        Task { [weak self, service] in
+            for await next in service.integers.stream {
+                self?.integer = next.value
+            }
+            print("Exit taskListen")
+        }
+        .store(in: &cancellables)
     }
 
     func sideEffect() {
@@ -158,6 +190,8 @@ class TestService {
     lazy var integers: SharedAsyncStream<Int> = .init(options: [.reloadOnActive]) { [weak self] in
         try await self?.networking.load()
     }
+
+    lazy var doubles: SharedAsyncStream<Double> = .init(initialValue: 2.0)
 
     init() {
         monitorViaTask()
@@ -191,6 +225,7 @@ class TestService {
 
     func sideEffect() {
         integers.send(4)
+        doubles.send(4.0)
     }
 }
 
