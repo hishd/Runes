@@ -196,10 +196,17 @@ class TestService {
     init() {
         monitorViaTask()
         monitorViaPublisher()
+        monitorViaObserver()
     }
 
     deinit {
         print("TestService deinit")
+    }
+
+    func monitorViaObserver() {
+        integers.addObserver(self) { element in
+            print("Observed \(element)")
+        }
     }
 
     func monitorViaTask() {

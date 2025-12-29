@@ -11,7 +11,7 @@ import os
 import UIKit
 #endif
 
-/// Shared datasource for async value streams. Subject automatically loads its initial state on first subscription.
+/// Shared datasource for async value streams. Stream can be set to automatically load its initial state on first subscription.
 /// ```swift
 /// class TestService {
 ///    lazy var integers: SharedAsyncStream<Int> = .init { [weak self] in
@@ -65,10 +65,10 @@ import UIKit
 /// ```
 /// Element has several helper functions like `value`, `error`, and so on that return optional instances if the type is in fact
 /// that particular state.
-/// /// ```swift
+/// ```swift
 /// self.value = next.value // returns value or nil if next isn't a value type
 /// ```
-/// As mentioned, state can be mutated whenever needed and new values sent to all subscribers/listeners.
+/// As mentioned, state can be mutated whenever needed and new values sent to all subscribers/observers.
 /// ```Swift
 /// extension TestService {
 ///     func update(value: Int, for id: Int) async throws {
@@ -91,9 +91,21 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
 
     // MARK: - State (protected by lock)
 
-    private struct Listener {
+    private struct Observer: Sendable {
+        let reference: Reference?
         let yield: @Sendable (Element) -> Void
         let finish: @Sendable () -> Void
+    }
+
+    private class Reference: @unchecked Sendable {
+        weak var object: AnyObject?
+        init?(_ object: AnyObject? = nil) {
+            if let object {
+                self.object = object
+            } else {
+                return nil
+            }
+        }
     }
 
     private var currentElement: Element
@@ -103,7 +115,7 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
     private var loader: AsyncLoader?
     private var didBecomeActiveObserver: NSObjectProtocol?
     private let options: SharedAsyncStreamOptions
-    private var listeners: [UUID: Listener] = [:]
+    private var observers: [UUID: Observer] = [:]
     private let lock = OSAllocatedUnfairLock()
 
     // MARK: - Init / Deinit
@@ -146,7 +158,7 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
 #endif
 
         currentTask?.cancel()
-        finishAllListeners()
+        finishAllObservers()
     }
 
     // MARK: - Current value access
@@ -169,13 +181,13 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
 
     // MARK: - Sending states
 
-    /// Cancels current load (if any) and sends value to all listeners
+    /// Cancels current load (if any) and sends value to all observers
     public func send(_ value: Value) {
         cancelCurrentTaskOnly()
         broadcast(.value(value))
     }
 
-    /// Cancels current load (if any) and sends error state to all listeners
+    /// Cancels current load (if any) and sends error state to all observers
     public func fail(with error: Error) {
         cancelCurrentTaskOnly()
         broadcast(.error(error))
@@ -203,7 +215,7 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
     /// Think of materialize/dematerialize in RxSwift.
     public var stream: AsyncStream<Element> {
         AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
-            let token = addAsyncListener(
+            let token = addAsyncObserver(
                 yield: { element in
                     continuation.yield(element)
                 },
@@ -213,7 +225,7 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
             )
 
             continuation.onTermination = { @Sendable _ in
-                self.removeAsyncListener(token)
+                self.removeAsyncObserver(token)
             }
         }
     }
@@ -237,7 +249,7 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
     public var values: AsyncThrowingStream<Value?, Error> {
         let throwsCancellationErrors = options.contains(.throwsCancellationErrors)
         return AsyncThrowingStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
-            let token = addAsyncListener(
+            let token = addAsyncObserver(
                 yield: { element in
                     switch element {
                     case .empty:
@@ -260,9 +272,24 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
             )
 
             continuation.onTermination = { @Sendable _ in
-                self.removeAsyncListener(token)
+                self.removeAsyncObserver(token)
             }
         }
+    }
+
+    // MARK: - Observers
+
+    ///  Registers a change observer to observe async events.
+    ///  ```swift
+    ///  service.addObserver(self) { element in
+    ///     print("Observed \(element)")
+    /// }
+    /// ```
+    /// This can be used as an alternative to for/await streams.
+    ///
+    /// The observer must be a reference type, as that's used to automatically remove the observer when the observing object goes out of scope.
+    public func addObserver<O: AnyObject>(_ observer: O, onNext: @escaping @Sendable (Element) -> Void) {
+        addAsyncObserver(observer, yield: onNext, finish: {})
     }
 
     // MARK: - Helpers
@@ -287,26 +314,31 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
 
     // MARK: - Internals (listener management)
 
-    internal func addAsyncListener(yield: @escaping @Sendable (Element) -> Void, finish: @escaping @Sendable () -> Void) -> UUID {
-        let asyncListenerToken = UUID()
+    internal func addAsyncObserver(
+        _ observer: AnyObject? = nil,
+        yield: @escaping @Sendable (Element) -> Void,
+        finish: @escaping @Sendable () -> Void
+    ) -> UUID {
+        let key = UUID()
+        let reference: Reference? = .init(observer)
 
-        let (element, task) = lock.withLock {
-            self.listeners[asyncListenerToken] = Listener(yield: yield, finish: finish)
-            return (currentElement, currentTask)
+        let (element, token) = lock.withLock {
+            self.observers[key] = Observer(reference: reference, yield: yield, finish: finish)
+            return (currentElement, currentToken)
         }
 
         yield(element) // always yields current value
 
         if case .loading = element {
-            triggerLoadIfNeeded(token: lock.withLock { self.currentToken })
+            self.triggerLoadIfNeeded(token: token)
         }
 
-        return asyncListenerToken
+        return key
     }
 
-    internal func removeAsyncListener(_ token: UUID) {
+   internal func removeAsyncObserver(_ token: UUID) {
         lock.withLock {
-            listeners[token] = nil
+            observers[token] = nil
         }
     }
 
@@ -316,16 +348,20 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
             return
         }
 
-        let (listeners, nextToken) = lock.withLock {
+        let (observers, nextToken) = lock.withLock {
             self.currentElement = element
             if token == nil {
                 self.currentToken &+= 1
             }
-            return (self.listeners, self.currentToken)
+            return (self.observers, self.currentToken)
         }
 
-        for listener in listeners {
-            listener.value.yield(element)
+        for observer in observers {
+            if let reference = observer.value.reference, reference.object == nil {
+                removeAsyncObserver(observer.key)
+            } else {
+                observer.value.yield(element)
+            }
         }
 
         if case .loading = element {
@@ -333,14 +369,14 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
         }
     }
 
-    private func finishAllListeners() {
-        let listeners = lock.withLock {
-            let currentListeners = self.listeners
-            self.listeners.removeAll()
-            return currentListeners
+    private func finishAllObservers() {
+        let observers = lock.withLock {
+            let currentObservers = self.observers
+            self.observers.removeAll()
+            return currentObservers
         }
 
-        for listener in listeners {
+        for listener in observers {
             listener.value.finish()
         }
     }
@@ -382,6 +418,10 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
                 clearCurrentTask(token: token)
             }
         }
+    }
+
+    private func getCurrentToken() -> Int {
+        lock.withLock { currentToken }
     }
 
     private func clearCurrentTask(token: Int) {
@@ -480,6 +520,6 @@ nonisolated public struct SharedAsyncStreamOptions: OptionSet {
     /// Sets global default preferences for AsyncValuesSubjects that don't specify their own.
     ///
     /// Default behavior loads on subscription, doesn't reload on active, sends loading states on reload, and task cancellation doesn't kill
-    /// await value listeners.
+    /// await value observers.
     nonisolated(unsafe) public static var defaults: SharedAsyncStreamOptions = []
 }

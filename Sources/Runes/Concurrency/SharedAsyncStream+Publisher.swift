@@ -65,7 +65,7 @@ public extension SharedAsyncStream {
                 demandLock.unlock()
 
                 if shouldStart {
-                    token = parent.addAsyncListener(
+                    token = parent.addAsyncObserver(
                         yield: { [weak self] element in
                             self?.push(element)
                         },
@@ -78,7 +78,7 @@ public extension SharedAsyncStream {
 
             func cancel() {
                 if let token {
-                    parent.removeAsyncListener(token)
+                    parent.removeAsyncObserver(token)
                 }
                 token = nil
                 downstream = nil
@@ -96,7 +96,7 @@ public extension SharedAsyncStream {
             private func complete() {
                 downstream = nil
                 if let token {
-                    parent.removeAsyncListener(token)
+                    parent.removeAsyncObserver(token)
                 }
                 token = nil
             }
