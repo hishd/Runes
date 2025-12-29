@@ -91,21 +91,14 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
 
     // MARK: - State (protected by lock)
 
-    private struct Observer: Sendable {
-        let reference: Reference?
+    private struct AsyncObserver: @unchecked Sendable {
+        let observingObject: ObservingObject?
         let yield: @Sendable (Element) -> Void
         let finish: @Sendable () -> Void
     }
 
-    private class Reference: @unchecked Sendable {
+    private struct ObservingObject: @unchecked Sendable {
         weak var object: AnyObject?
-        init?(_ object: AnyObject? = nil) {
-            if let object {
-                self.object = object
-            } else {
-                return nil
-            }
-        }
     }
 
     private var currentElement: Element
@@ -115,7 +108,7 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
     private var loader: AsyncLoader?
     private var didBecomeActiveObserver: NSObjectProtocol?
     private let options: SharedAsyncStreamOptions
-    private var observers: [UUID: Observer] = [:]
+    private var observers: [String : AsyncObserver] = [:]
     private let lock = OSAllocatedUnfairLock()
 
     // MARK: - Init / Deinit
@@ -277,32 +270,6 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
         }
     }
 
-    // MARK: - Observers
-
-    ///  Registers a change observer to observe async events.
-    ///  ```swift
-    ///  service.addObserver(self) { element in
-    ///     print("Observed \(element)")
-    /// }
-    /// ```
-    /// This can be used as an alternative to for/await streams.
-    ///
-    /// The observer must be a reference type, as that's used to automatically remove the observer when the observing object goes out of scope.
-    public func addObserver<O: AnyObject>(_ observer: O, onNext: @escaping @Sendable (Element) -> Void) {
-        addAsyncObserver(observer, yield: onNext, finish: {})
-    }
-
-    /// Removes an observer from the list. Manual removal isn't normally needed since observers are automatically removed when the observing
-    /// object goes out of scope.
-    ///  ```swift
-    ///  service.removeObserver(self)
-    /// ```
-    public func removeObserver<O: AnyObject>(_ observer: O) {
-        lock.lock()
-        observers = observers.filter { $1.reference?.object !== observer }
-        lock.unlock()
-    }
-
     // MARK: - Helpers
 
     /// Force a reload via the async loader typically after explicit invalidation.
@@ -323,18 +290,23 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
         lock.withLock { currentTaskToken != nil }
     }
 
-    // MARK: - Internals (listener management)
+    // MARK: - Internals (observer management)
 
     internal func addAsyncObserver(
         _ observer: AnyObject? = nil,
         yield: @escaping @Sendable (Element) -> Void,
         finish: @escaping @Sendable () -> Void
-    ) -> UUID {
-        let key = UUID()
-        let reference: Reference? = .init(observer)
+    ) -> String {
+        let key: String = if let observer {
+            "\(ObjectIdentifier(observer))"
+        } else {
+            UUID().uuidString
+        }
+
+        let observingObject: ObservingObject? = observer == nil ? nil : .init(object: observer)
 
         let (element, token) = lock.withLock {
-            self.observers[key] = Observer(reference: reference, yield: yield, finish: finish)
+            self.observers[key] = AsyncObserver(observingObject: observingObject, yield: yield, finish: finish)
             return (currentElement, currentToken)
         }
 
@@ -347,9 +319,9 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
         return key
     }
 
-   internal func removeAsyncObserver(_ key: UUID) {
+   internal func removeAsyncObserver(_ key: String) {
         lock.withLock {
-            observers[key] = nil
+            observers.removeValue(forKey: key)
         }
     }
 
@@ -368,7 +340,7 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
         }
 
         for observer in observers {
-            if let reference = observer.value.reference, reference.object == nil {
+            if let observingObject = observer.value.observingObject, observingObject.object == nil {
                 removeAsyncObserver(observer.key)
             } else {
                 observer.value.yield(element)
