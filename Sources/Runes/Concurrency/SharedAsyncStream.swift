@@ -292,6 +292,17 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
         addAsyncObserver(observer, yield: onNext, finish: {})
     }
 
+    /// Removes an observer from the list. Manual removal isn't normally needed since observers are automatically removed when the observing
+    /// object goes out of scope.
+    ///  ```swift
+    ///  service.removeObserver(self)
+    /// ```
+    public func removeObserver<O: AnyObject>(_ observer: O) {
+        lock.lock()
+        observers = observers.filter { $1.reference?.object !== observer }
+        lock.unlock()
+    }
+
     // MARK: - Helpers
 
     /// Force a reload via the async loader typically after explicit invalidation.
@@ -336,9 +347,9 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
         return key
     }
 
-   internal func removeAsyncObserver(_ token: UUID) {
+   internal func removeAsyncObserver(_ key: UUID) {
         lock.withLock {
-            observers[token] = nil
+            observers[key] = nil
         }
     }
 
