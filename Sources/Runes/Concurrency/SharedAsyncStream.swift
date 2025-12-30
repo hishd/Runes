@@ -298,10 +298,10 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
         yield: @escaping @Sendable (Element) -> Void,
         finish: @escaping @Sendable () -> Void,
     ) -> UUID {
-        let observingObject: ObservingObject? = observer == nil ? nil : .init(object: observer)
+        let object: ObservingObject? = observer == nil ? nil : .init(object: observer)
 
         let (element, token) = lock.withLock {
-            self.observers[key] = AsyncObserver(observingObject: observingObject, yield: yield, finish: finish)
+            self.observers[key] = AsyncObserver(observingObject: object, yield: yield, finish: finish)
             return (currentElement, currentToken)
         }
 

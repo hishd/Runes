@@ -124,20 +124,17 @@ class AsyncDemoViewModel {
     var cancellables = Set<AnyCancellable>()
 
     var integer: Int? = nil
+    var copy: Int? = nil
     var double: Double? = nil
     var another: Bool = false
 
     init() {
         taskListen()
+        observerListen()
+        assignListen()
     }
 
     func asyncListen() async {
-        for await next in service.integers.stream {
-            integer = next.value
-        }
-    }
-
-    func asyncListen2() async {
         for await next in service.integers.stream {
             integer = next.value
         }
@@ -168,6 +165,16 @@ class AsyncDemoViewModel {
             print("Exit taskListen")
         }
         .store(in: &cancellables)
+    }
+
+    func observerListen() {
+        service.doubles.addObserver(self) { [weak self] next in
+            self?.double = next.value
+        }
+    }
+
+    func assignListen() {
+        service.integers.assign(\.copy, on: self)
     }
 
     func sideEffect() {
@@ -232,7 +239,6 @@ class TestService {
             for await next in integers.stream {
                 self?.lastValueSeen = next.value
             }
-            print("Task monitoring completed")
         }
         .store(in: &cancellables)
     }
