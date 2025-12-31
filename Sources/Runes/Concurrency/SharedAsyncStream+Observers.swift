@@ -19,26 +19,17 @@ extension SharedAsyncStream {
     /// The onNext handler will always be called on the MainThread. Use `addNonisolatedObserver` if you don't care about such things.
     @discardableResult
     public func addObserver<O: AnyObject>(_ observer: O, onNext: @escaping @Sendable @MainActor (Element) -> Void) -> UUID {
-        let key = UUID()
-        addAsyncObserver(
-            key: key,
-            observer: observer,
-            yield: { element in
-                if Thread.isMainThread {
-                    MainActor.assumeIsolated {
-                        onNext(element)
-                    }
-                } else {
-                    RunLoop.main.perform {
-                        onNext(element)
-                    }
+        addNonisolatedObserver(observer) { element in
+            if Thread.isMainThread {
+                MainActor.assumeIsolated {
+                    onNext(element)
                 }
-            },
-            finish: { [weak self] in
-                self?.removeAsyncObserver(key)
+            } else {
+                RunLoop.main.perform {
+                    onNext(element)
+                }
             }
-        )
-        return key
+        }
     }
 
     ///  Registers a nonisolated change observer to observe async events. This can be used as an alternative to for/await streams.
@@ -49,7 +40,7 @@ extension SharedAsyncStream {
     /// ```
     /// The observer must be a reference type, as that's used to automatically remove the observer when the observing object goes out of scope.
     @discardableResult
-    public func addNonisolatedObserver<O: AnyObject>(_ observer: O, onNext: @escaping @Sendable (Element) -> Void) -> UUID {
+    public func addNonisolatedObserver<O: AnyObject>(_ observer: O, onNext: @escaping YieldBlock<Element>) -> UUID {
         let key = UUID()
         addAsyncObserver(key: key, observer: observer, yield: onNext) { [weak self] in
             self?.removeAsyncObserver(key)

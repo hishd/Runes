@@ -91,14 +91,17 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
 
     // MARK: - State (protected by lock)
 
+    public typealias YieldBlock<Element> = @Sendable (Element) -> Void
+    public typealias FinishBlock = @Sendable () -> Void
+
     private struct AsyncObserver: @unchecked Sendable {
         let observingObject: ObservingObject?
-        let yield: @Sendable (Element) -> Void
-        let finish: @Sendable () -> Void
+        let yield: YieldBlock<Element>
+        let finish: FinishBlock
     }
 
     private struct ObservingObject: @unchecked Sendable {
-        weak var object: AnyObject?
+        weak var reference: AnyObject?
     }
 
     private var currentElement: Element
@@ -276,13 +279,13 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
     ///
     /// Does nothing if loading is currently in progress.
     public func reload() {
-        guard lock.withLock { currentTaskToken == nil } == true else {
+        guard let token: Int = lock.withLock({ currentTaskToken == nil ? currentToken : nil }) else {
             return
         }
         if !options.contains(.reloadsSilently) {
             broadcast(.loading)
         }
-        triggerLoadIfNeeded(token: lock.withLock { self.currentToken })
+        triggerLoadIfNeeded(token: token)
     }
 
     /// external check on loading status
@@ -295,10 +298,10 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
     internal func addAsyncObserver(
         key: UUID = .init(),
         observer: AnyObject? = nil,
-        yield: @escaping @Sendable (Element) -> Void,
-        finish: @escaping @Sendable () -> Void,
+        yield: @escaping YieldBlock<Element>,
+        finish: @escaping FinishBlock,
     ) -> UUID {
-        let object: ObservingObject? = observer == nil ? nil : .init(object: observer)
+        let object: ObservingObject? = observer == nil ? nil : .init(reference: observer)
 
         let (element, token) = lock.withLock {
             self.observers[key] = AsyncObserver(observingObject: object, yield: yield, finish: finish)
@@ -335,7 +338,7 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
         }
 
         for observer in observers {
-            if let observingObject = observer.value.observingObject, observingObject.object == nil {
+            if let observingObject = observer.value.observingObject, observingObject.reference == nil {
                 removeAsyncObserver(observer.key)
             } else {
                 observer.value.yield(element)
@@ -349,9 +352,8 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
 
     private func finishAllObservers() {
         let observers = lock.withLock {
-            let currentObservers = self.observers
-            self.observers.removeAll()
-            return currentObservers
+            defer { self.observers.removeAll() }
+            return self.observers
         }
 
         for listener in observers {
@@ -404,11 +406,10 @@ nonisolated final public class SharedAsyncStream<Value: Sendable>: @unchecked Se
 
     private func clearCurrentTask(token: Int) {
         lock.withLock {
-            guard currentTaskToken == token else {
-                return
+            if currentTaskToken == token {
+                self.currentTask = nil
+                self.currentTaskToken = nil
             }
-            self.currentTask = nil
-            self.currentTaskToken = nil
         }
     }
 }

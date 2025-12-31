@@ -57,11 +57,6 @@ struct AsyncFunctionTaskValueView: View {
                 await viewModel.asyncListen()
                 print("Async Function Listening completed")
             }
-            .task {
-                print("Async Group Listening")
-                await viewModel.asyncTaskGroupListen()
-                print("Async Group Listening completed")
-            }
     }
 }
 
@@ -129,9 +124,9 @@ class AsyncDemoViewModel {
     var another: Bool = false
 
     init() {
-        taskListen()
-        observerListen()
-        assignListen()
+//        taskListen()
+//        observerListen()
+//        assignListen()
     }
 
     func asyncListen() async {
@@ -225,7 +220,7 @@ class TestService {
 
     func monitorViaAssignment() {
         integers.assign(\.element, on: self)
-        integers.assign(\.integer, on: self)
+//        integers.assign(\.integer, on: self)
     }
 
     func monitorViaObserver() {
@@ -255,7 +250,8 @@ class TestService {
     var lastValueSeen: Int? = nil
 
     func sideEffect() {
-        integers.send(4)
+        let current = integers.value ?? 0
+        integers.send(current + 2)
         doubles.send(4.0)
     }
 }
