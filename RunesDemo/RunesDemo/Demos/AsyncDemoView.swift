@@ -122,7 +122,7 @@ class AsyncDemoViewModel {
     var cancellables = Set<AnyCancellable>()
 
     var integer: Int? = nil
-    var assigned: Int? = nil
+    var assigned: Int = -1
     var double: Double? = nil
     var another: Int = 0
 
@@ -156,7 +156,7 @@ class AsyncDemoViewModel {
     }
 
     func assignListen() {
-        service.integers.assign(\.assigned, on: self)
+        service.integers.assign(\.assigned, on: self, defaultValue: 0)
     }
 
     func sideEffect() {
